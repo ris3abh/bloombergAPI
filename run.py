@@ -227,6 +227,54 @@ class BloombergAPIClient:
                 }
         
         return results
+    
+    def get_client_datasets(self):
+        """Get datasets from the client-defined resources catalog"""
+        token = self.authenticate()
+        
+        datasets_url = f"{self.api_host}/eap/catalogs/48408/datasets"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "api-version": "2"
+        }
+        
+        try:
+            response = requests.get(datasets_url, headers=headers)
+            response.raise_for_status()
+            
+            datasets = response.json()
+            logger.info(f"Retrieved client datasets")
+            return datasets
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Failed to get client datasets: {str(e)}")
+            if hasattr(e, 'response') and e.response:
+                logger.error(f"Response: {e.response.text}")
+            raise
+
+    def explore_dataset(self, dataset_id):
+        """Explore a specific dataset to understand its structure"""
+        token = self.authenticate()
+        
+        dataset_url = f"{self.api_host}/eap/catalogs/48408/datasets/{dataset_id}"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "api-version": "2"
+        }
+        
+        try:
+            response = requests.get(dataset_url, headers=headers)
+            response.raise_for_status()
+            
+            dataset_info = response.json()
+            logger.info(f"Retrieved dataset information")
+            return dataset_info
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Failed to get dataset info: {str(e)}")
+            if hasattr(e, 'response') and e.response:
+                logger.error(f"Response: {e.response.text}")
+            raise
 
 # Main execution
 if __name__ == "__main__":
@@ -236,35 +284,49 @@ if __name__ == "__main__":
         token = client.authenticate()
         logger.info("Authentication test successful")
         
-        # First, try to get token info
-        token_info = client.get_token_info()
-        if token_info:
-            logger.info(f"Token info: {json.dumps(token_info, indent=2)}")
+        # Get client datasets
+        client_datasets = client.get_client_datasets()
+        datasets = client_datasets.get('contains', [])
+        logger.info(f"Found {len(datasets)} client datasets")
         
-        # Explore available endpoints
-        logger.info("Exploring available endpoints...")
-        endpoints_results = client.explore_available_endpoints()
-        
-        # Print results
-        logger.info("Endpoint accessibility results:")
-        for endpoint, result in endpoints_results.items():
-            status = result.get("status")
-            accessible = result.get("accessible")
-            logger.info(f"Endpoint {endpoint}: {'✓' if accessible else '✗'} (Status: {status})")
+        # Look for financial analysis related datasets
+        financial_datasets = []
+        for dataset in datasets:
+            title = dataset.get('title', '')
+            description = dataset.get('description', '')
+            dataset_id = dataset.get('@id', '').strip('/')  # Remove trailing slash if present
             
-            if accessible:
-                preview = result.get("data_preview", "")
-                if preview:
-                    logger.info(f"  Preview: {preview}")
+            if any(keyword in (description + title).lower() for keyword in 
+                  ['financial', 'statement', 'ratio', 'earning', 'credit', 'balance', 'income']):
+                financial_datasets.append({
+                    'id': dataset_id,
+                    'title': title,
+                    'description': description
+                })
         
-        # If we found accessible endpoints, suggest next steps
-        accessible_endpoints = [ep for ep, res in endpoints_results.items() if res.get("accessible")]
-        if accessible_endpoints:
-            logger.info("\nSuggested next steps:")
-            logger.info("Based on the accessible endpoints, you can:")
-            for endpoint in accessible_endpoints:
-                logger.info(f"- Explore {endpoint} in more detail")
-            logger.info("- Create specific functions to extract data from these endpoints")
+        # Print financial datasets
+        if financial_datasets:
+            logger.info(f"Found {len(financial_datasets)} financial analysis related datasets:")
+            for dataset in financial_datasets:
+                print(f"Dataset ID: {dataset['id']}")
+                print(f"Title: {dataset['title']}")
+                print(f"Description: {dataset['description']}")
+                print("-" * 50)
+                
+                # Optionally, explore one dataset in detail
+                if dataset == financial_datasets[0]:  # Just explore the first one as an example
+                    dataset_info = client.explore_dataset(dataset['id'])
+                    print(f"Dataset structure:")
+                    print(json.dumps(dataset_info, indent=2))
+        else:
+            logger.info("No financial analysis related datasets found")
+            # Show all available datasets
+            logger.info("Available datasets:")
+            for dataset in datasets:
+                print(f"Dataset ID: {dataset.get('@id', '').strip('/')}")
+                print(f"Title: {dataset.get('title', '')}")
+                print(f"Description: {dataset.get('description', '')}")
+                print("-" * 50)
         
     except Exception as e:
         logger.error(f"Error in main execution: {str(e)}")
