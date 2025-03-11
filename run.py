@@ -1,332 +1,222 @@
-import os
 import requests
 import json
-from dotenv import load_dotenv
-import time
+import os
 import logging
+import datetime
+from urllib.parse import urljoin
+from dotenv import load_dotenv
+from oauthlib.oauth2 import BackendApplicationClient, TokenExpiredError
+from requests_oauthlib import OAuth2Session
 
-# Set up logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
-
-# Load environment variables
+# Load environment variables from .env file
 load_dotenv()
 
-class BloombergAPIClient:
-    def __init__(self):
-        # Load credentials from environment variables
-        self.client_id = os.getenv('BLOOMBERG_CLIENT_ID')
-        self.client_secret = os.getenv('BLOOMBERG_CLIENT_SECRET')
-        self.api_host = os.getenv('BLOOMBERG_API_HOST')
-        self.oauth_endpoint = os.getenv('BLOOMBERG_OAUTH_ENDPOINT')
-        
-        # Initialize token variables
-        self.access_token = None
-        self.token_expiry = 0
-        
-    def authenticate(self):
-        """Get an OAuth access token from Bloomberg"""
-        if self.access_token and time.time() < self.token_expiry - 60:
-            return self.access_token
-        logger.info("Getting new access token...")
-        auth_url = f"{self.oauth_endpoint}"
-        headers = {
-            "Content-Type": "application/x-www-form-urlencoded"
-        }
-        data = {
-            "grant_type": "client_credentials",
-            "client_id": self.client_id,
-            "client_secret": self.client_secret
-        }
-        
-        try:
-            response = requests.post(auth_url, headers=headers, data=data)
-            response.raise_for_status()
-            
-            token_data = response.json()
-            self.access_token = token_data.get('access_token')
-            # Set expiry time (usually 3600 seconds/1 hour)
-            expires_in = token_data.get('expires_in', 3600)
-            self.token_expiry = time.time() + expires_in
-            
-            logger.info(f"Authentication successful, token valid for {expires_in} seconds")
-            return self.access_token
-            
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Authentication failed: {str(e)}")
-            if hasattr(e, 'response') and e.response:
-                logger.error(f"Response: {e.response.text}")
-            raise
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)-8s] [%(name)s:%(lineno)s]: %(message)s',
+)
+LOG = logging.getLogger(__name__)
 
-    def get_bloomberg_data_catalog(self):
-        """Get the Bloomberg Data catalog"""
-        token = self.authenticate()
-        
-        # The Bloomberg Data catalog URL
-        bbg_url = f"{self.api_host}/eap/catalogs/bbg/"
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-            "api-version": "2"
-        }
-        
-        try:
-            response = requests.get(bbg_url, headers=headers)
-            response.raise_for_status()
-            
-            catalog_data = response.json()
-            logger.info(f"Retrieved Bloomberg Data catalog")
-            return catalog_data
-            
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Failed to get Bloomberg Data catalog: {str(e)}")
-            if hasattr(e, 'response') and e.response:
-                logger.error(f"Response: {e.response.text}")
-            raise
-    
-    def get_data_catalogs(self):
-        """Get available data catalogs from Bloomberg EAP"""
-        token = self.authenticate()
-        
-        catalogs_url = f"{self.api_host}/eap/catalogs/"  # Note the trailing slash
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-            "api-version": "2"
-        }
-        
-        try:
-            response = requests.get(catalogs_url, headers=headers)
-            response.raise_for_status()
-            
-            catalogs = response.json()
-            logger.info(f"Retrieved {len(catalogs) if isinstance(catalogs, list) else 'catalog'} data")
-            return catalogs
-            
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Failed to get data catalogs: {str(e)}")
-            if hasattr(e, 'response') and e.response:
-                logger.error(f"Response: {e.response.text}")
-            raise
+# Configuration
+HOST = 'https://api.bloomberg.com'
+CLIENT_ID = os.environ.get("BLOOMBERG_CLIENT_ID")
+CLIENT_SECRET = os.environ.get("BLOOMBERG_CLIENT_SECRET")
+OAUTH2_ENDPOINT = "https://bsso.blpprofessional.com/ext/api/as/token.oauth2"
 
-    def get_datasets_catalog(self):
-        """Get the Datasets catalog from Bloomberg"""
-        token = self.authenticate()
-        
-        datasets_url = f"{self.api_host}/eap/catalogs/bbg/datasets/"
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-            "api-version": "2"
-        }
-        
-        try:
-            response = requests.get(datasets_url, headers=headers)
-            response.raise_for_status()
-            
-            datasets = response.json()
-            logger.info(f"Retrieved datasets catalog")
-            return datasets
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Failed to get datasets catalog: {str(e)}")
-            if hasattr(e, 'response') and e.response:
-                logger.error(f"Response: {e.response.text}")
-            raise
-    
-    def get_financial_dataset_info(self, catalog_id):
-        """Get information about a specific financial dataset"""
-        token = self.authenticate()
-        
-        dataset_url = f"{self.api_host}/eap/catalogs/{catalog_id}"
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json"
-        }
-        
-        try:
-            response = requests.get(dataset_url, headers=headers)
-            response.raise_for_status()
-            
-            dataset_info = response.json()
-            logger.info(f"Retrieved information for dataset {catalog_id}")
-            return dataset_info
-            
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Failed to get dataset info: {str(e)}")
-            if hasattr(e, 'response') and e.response:
-                logger.error(f"Response: {e.response.text}")
-            raise
+class BloombergApiSession(OAuth2Session):
+    """Custom session class for making requests to Bloomberg API using OAuth2 authentication."""
 
-    def get_token_info(self):
-        """Get information about the current token"""
-        token = self.authenticate()
-        
-        # Some APIs provide an endpoint to check token permissions
-        token_info_url = f"{self.api_host}/eap/token-info"  # This is a guess - the actual endpoint may differ
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-            "api-version": "2"
-        }
-        
-        try:
-            response = requests.get(token_info_url, headers=headers)
-            if response.status_code == 200:
-                return response.json()
-            else:
-                logger.warning(f"Could not get token info: {response.status_code}")
-                return None
-        except Exception as e:
-            logger.warning(f"Error getting token info: {str(e)}")
-            return None
+    def __init__(self, *args, **kwargs):
+        """Initialize a BloombergApiSession instance."""
+        super().__init__(*args, **kwargs)
+        # This is a required header for each call to Bloomberg API
+        self.headers['api-version'] = '2'
 
-    def explore_available_endpoints(self):
-        """Systematically explore available endpoints"""
-        token = self.authenticate()
-        
-        # List of potential endpoints to try
-        potential_endpoints = [
-            "/eap/catalogs/bbg/datasets",
-            "/eap/catalogs/bbg/publishers",
-            "/eap/data",
-            "/eap/data-license",
-            "/eap/catalogs/48408",  # The client-defined resources catalog
-            "/eap/catalogs/48408/datasets"
-        ]
-        
-        results = {}
-        for endpoint in potential_endpoints:
-            url = f"{self.api_host}{endpoint}"
-            headers = {
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json",
-                "api-version": "2"
-            }
-            
-            try:
-                logger.info(f"Trying endpoint: {url}")
-                response = requests.get(url, headers=headers)
-                status = response.status_code
-                results[endpoint] = {
-                    "status": status,
-                    "accessible": status < 400
-                }
-                
-                if status < 400:
-                    try:
-                        data = response.json()
-                        results[endpoint]["data_preview"] = str(data)[:200] + "..."
-                    except:
-                        results[endpoint]["data_preview"] = "Non-JSON response"
-                
-            except Exception as e:
-                results[endpoint] = {
-                    "status": "error",
-                    "error": str(e),
-                    "accessible": False
-                }
-        
-        return results
-    
-    def get_client_datasets(self):
-        """Get datasets from the client-defined resources catalog"""
-        token = self.authenticate()
-        
-        datasets_url = f"{self.api_host}/eap/catalogs/48408/datasets"
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-            "api-version": "2"
-        }
-        
-        try:
-            response = requests.get(datasets_url, headers=headers)
-            response.raise_for_status()
-            
-            datasets = response.json()
-            logger.info(f"Retrieved client datasets")
-            return datasets
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Failed to get client datasets: {str(e)}")
-            if hasattr(e, 'response') and e.response:
-                logger.error(f"Response: {e.response.text}")
-            raise
+    def request_token(self):
+        """Fetch an OAuth2 access token by making a request to the token endpoint."""
+        self.token = self.fetch_token(
+            token_url=OAUTH2_ENDPOINT,
+            client_secret=CLIENT_SECRET
+        )
+        expires_in_hours = self.token.get('expires_in', 0) / 3600
+        LOG.info(f'OAuth2 token obtained. Expires in {expires_in_hours:.1f} hours')
 
-    def explore_dataset(self, dataset_id):
-        """Explore a specific dataset to understand its structure"""
-        token = self.authenticate()
-        
-        dataset_url = f"{self.api_host}/eap/catalogs/48408/datasets/{dataset_id}"
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-            "api-version": "2"
-        }
-        
+    def request(self, *args, **kwargs):
+        """
+        Override the parent class method to handle TokenExpiredError by refreshing the token.
+        """
         try:
-            response = requests.get(dataset_url, headers=headers)
-            response.raise_for_status()
-            
-            dataset_info = response.json()
-            logger.info(f"Retrieved dataset information")
-            return dataset_info
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Failed to get dataset info: {str(e)}")
-            if hasattr(e, 'response') and e.response:
-                logger.error(f"Response: {e.response.text}")
-            raise
+            response = super().request(*args, **kwargs)
+        except TokenExpiredError:
+            LOG.info("Token expired. Requesting a new one...")
+            self.request_token()
+            response = super().request(*args, **kwargs)
+        return response
 
-# Main execution
-if __name__ == "__main__":
-    client = BloombergAPIClient()
-    
-    try:
-        token = client.authenticate()
-        logger.info("Authentication test successful")
-        
-        # Get client datasets
-        client_datasets = client.get_client_datasets()
-        datasets = client_datasets.get('contains', [])
-        logger.info(f"Found {len(datasets)} client datasets")
-        
-        # Look for financial analysis related datasets
-        financial_datasets = []
-        for dataset in datasets:
-            title = dataset.get('title', '')
-            description = dataset.get('description', '')
-            dataset_id = dataset.get('@id', '').strip('/')  # Remove trailing slash if present
-            
-            if any(keyword in (description + title).lower() for keyword in 
-                  ['financial', 'statement', 'ratio', 'earning', 'credit', 'balance', 'income']):
-                financial_datasets.append({
-                    'id': dataset_id,
-                    'title': title,
-                    'description': description
-                })
-        
-        # Print financial datasets
-        if financial_datasets:
-            logger.info(f"Found {len(financial_datasets)} financial analysis related datasets:")
-            for dataset in financial_datasets:
-                print(f"Dataset ID: {dataset['id']}")
-                print(f"Title: {dataset['title']}")
-                print(f"Description: {dataset['description']}")
-                print("-" * 50)
-                
-                # Optionally, explore one dataset in detail
-                if dataset == financial_datasets[0]:  # Just explore the first one as an example
-                    dataset_info = client.explore_dataset(dataset['id'])
-                    print(f"Dataset structure:")
-                    print(json.dumps(dataset_info, indent=2))
+    def send(self, request, **kwargs):
+        """
+        Override the parent class method to log request and response information.
+        """
+        LOG.info("Request being sent to HTTP server: %s, %s, %s", request.method, request.url, request.headers)
+
+        response = super().send(request, **kwargs)
+
+        LOG.info("Response status: %s", response.status_code)
+        LOG.info("Response x-request-id: %s", response.headers.get("x-request-id"))
+
+        if response.ok:
+            # Filter out file download responses and empty responses.
+            if not response.headers.get("Content-Disposition") and response.content:
+                # Limit the response content logging to avoid overwhelming logs
+                content = response.json()
+                LOG.info("Response content: %s", json.dumps(content, indent=2)[:300] + "...")
         else:
-            logger.info("No financial analysis related datasets found")
-            # Show all available datasets
-            logger.info("Available datasets:")
-            for dataset in datasets:
-                print(f"Dataset ID: {dataset.get('@id', '').strip('/')}")
-                print(f"Title: {dataset.get('title', '')}")
-                print(f"Description: {dataset.get('description', '')}")
-                print("-" * 50)
+            try:
+                error_detail = response.json()
+                LOG.error("Error response: %s", json.dumps(error_detail, indent=2))
+            except:
+                LOG.error("Error response (not JSON): %s", response.text[:300])
+            
+            raise RuntimeError(f'\n\tUnexpected response status code: {response.status_code}\nDetails: {response.text[:300]}')
+
+        return response
+
+def get_catalog_data(catalog_id=None):
+    """
+    Retrieve catalog data from Bloomberg API.
+    
+    Args:
+        catalog_id (str, optional): The ID of a specific catalog to retrieve.
+                                   If None, retrieves all catalogs.
+    
+    Returns:
+        dict: The catalog data
+    """
+    if not CLIENT_ID or not CLIENT_SECRET:
+        raise ValueError("Bloomberg client credentials not found. Please set BLOOMBERG_CLIENT_ID and BLOOMBERG_CLIENT_SECRET in your .env file.")
+
+    # Initialize OAuth session
+    client = BackendApplicationClient(client_id=CLIENT_ID)
+    session = BloombergApiSession(client=client)
+    session.request_token()
+    
+    # Construct the URL based on whether a catalog_id was provided
+    if catalog_id:
+        url = urljoin(HOST, f'/eap/catalogs/{catalog_id}')
+    else:
+        url = urljoin(HOST, '/eap/catalogs/')
+    
+    # Make the request
+    response = session.get(url)
+    return response.json()
+
+def discover_scheduled_catalog():
+    """
+    Discover the catalog identifier for scheduling requests.
+    
+    Returns:
+        str: The catalog ID for scheduled requests
+    """
+    catalogs_data = get_catalog_data()
+    catalogs = catalogs_data['contains']
+    
+    for catalog in catalogs:
+        if catalog.get('subscriptionType') == 'scheduled':
+            # Take the catalog having "scheduled" subscription type,
+            # which corresponds to the Data License account number.
+            return catalog['identifier']
+    
+    # We exhausted the catalogs, but didn't find a scheduled catalog.
+    LOG.error('Scheduled catalog not in %r', catalogs)
+    raise RuntimeError('Scheduled catalog not found')
+
+def explore_catalog_resources(catalog_id, resource_type):
+    """
+    Explore a specific resource type within the catalog (datasets, requests, etc.)
+    
+    Args:
+        catalog_id (str): The catalog ID
+        resource_type (str): The type of resource to explore (datasets, requests, etc.)
+    
+    Returns:
+        dict: The resource data
+    """
+    # Initialize a new session for this request
+    client = BackendApplicationClient(client_id=CLIENT_ID)
+    session = BloombergApiSession(client=client)
+    session.request_token()
+    
+    url = urljoin(HOST, f'/eap/catalogs/{catalog_id}/{resource_type}')
+    
+    response = session.get(url)
+    return response.json()
+
+def explore_catalog_structure(catalog_data):
+    """
+    Explore and print the structure of the catalog data.
+    
+    Args:
+        catalog_data (dict): The catalog data to explore
+    """
+    if not catalog_data:
+        LOG.info("No catalog data to explore.")
+        return
+    
+    # Print basic catalog information
+    LOG.info(f"Catalog ID: {catalog_data.get('identifier', 'N/A')}")
+    LOG.info(f"Catalog Title: {catalog_data.get('title', 'N/A')}")
+    LOG.info(f"Description: {catalog_data.get('description', 'N/A')}")
+    
+    # Print contained resources
+    if 'contains' in catalog_data:
+        LOG.info("\nContained resources:")
+        for resource in catalog_data['contains']:
+            LOG.info(f"- {resource.get('title', 'Unnamed')}: {resource.get('description', 'No description')}")
+            LOG.info(f"  ID: {resource.get('@id', 'N/A')}")
+
+def save_catalog_data(catalog_data, filename=None):
+    """
+    Save the catalog data to a JSON file.
+    
+    Args:
+        catalog_data (dict): The catalog data to save
+        filename (str, optional): Custom filename. If None, a default name with timestamp will be used.
+    """
+    if not catalog_data:
+        LOG.info("No catalog data to save.")
+        return
+    
+    if not filename:
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        catalog_id = catalog_data.get('identifier', 'unknown')
+        filename = f"data/bloomberg_catalog_{catalog_id}_{timestamp}.json"
+    
+    with open(filename, 'w') as f:
+        json.dump(catalog_data, f, indent=2)
+    
+    LOG.info(f"Catalog data saved to {filename}")
+
+if __name__ == "__main__":
+    try:
+        # Discover the scheduled catalog ID
+        catalog_id = discover_scheduled_catalog()
+        LOG.info(f"Discovered scheduled catalog ID: {catalog_id}")
         
+        # Get detailed information about the catalog
+        catalog_data = get_catalog_data(catalog_id)
+        explore_catalog_structure(catalog_data)
+        save_catalog_data(catalog_data)
+        
+        # Explore different resource types
+        resource_types = ["datasets", "requests", "universes", "fieldLists", "triggers"]
+        for resource_type in resource_types:
+            LOG.info(f"\nExploring {resource_type}...")
+            try:
+                resource_data = explore_catalog_resources(catalog_id, resource_type)
+                save_catalog_data(resource_data, f"bloomberg_{resource_type}_{catalog_id}.json")
+            except Exception as e:
+                LOG.error(f"Error exploring {resource_type}: {e}")
+    
     except Exception as e:
-        logger.error(f"Error in main execution: {str(e)}")
+        LOG.error(f"Error in main execution: {e}", exc_info=True)
