@@ -1,0 +1,77 @@
+[
+    {
+        "@type": "Identifier",
+        "identifierType": "TICKER",
+        "identifierValue": "AAPL US Equity"
+    },
+    {
+        "@type": "Identifier",
+        "identifierType": "BB_GLOBAL",
+        "identifierValue": "BBG009S3NB30"
+    },
+    {
+        "@type": "Identifier",
+        "identifierType": "ISIN",
+        "identifierValue": "US88160R1014"
+    },
+    {
+        "@type": "Identifier",
+        "identifierType": "TICKER",
+        "identifierValue": "MSFT US Equity"
+    },
+    {
+        "@type": "Identifier",
+        "identifierType": "ISIN",
+        "identifierValue": "US5949181045"
+    },
+    {
+        "@type": "Identifier",
+        "identifierType": "TICKER",
+        "identifierValue": "AMZN US Equity"
+    },
+    {
+        "@type": "Identifier",
+        "identifierType": "ISIN",
+        "identifierValue": "US0231351067"
+    },
+    {
+        "@type": "Identifier",
+        "identifierType": "TICKER",
+        "identifierValue": "TSLA US Equity"
+    },
+    {
+        "@type": "Identifier",
+        "identifierType": "ISIN",
+        "identifierValue": "US88160R1014"
+    },
+    {
+        "@type": "Identifier",
+        "identifierType": "ISIN",
+        "identifierValue": "US5949181045"
+    },
+    {
+        "@type": "Identifier",
+        "identifierType": "TICKER",
+        "identifierValue": "NFLX US Equity"
+    },
+    {
+        "@type": "Identifier",
+        "identifierType": "TICKER",
+        "identifierValue": "NVDA US Equity"
+    },
+    {
+        "@type": "Identifier",
+        "identifierType": "ISIN",
+        "identifierValue": "US67066G1040"
+    },
+    {
+        "@type": "Identifier",
+        "identifierType": "ISIN",
+        "identifierValue": "US0378331005"
+    },
+    {
+        "@type": "Identifier",
+        "identifierType": "TICKER",
+        "identifierValue": "IBM US Equity"
+    }
+]

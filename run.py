@@ -1,62 +1,67 @@
-import requests
-import json
-import os
-import logging
 import datetime
+import io
+import json
+import logging
+import os
+import shutil
+import time
+import uuid
 from urllib.parse import urljoin
 from dotenv import load_dotenv
+
 from oauthlib.oauth2 import BackendApplicationClient, TokenExpiredError
 from requests_oauthlib import OAuth2Session
 
-# Load environment variables from .env file
 load_dotenv()
 
-# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)-8s] [%(name)s:%(lineno)s]: %(message)s',
 )
 LOG = logging.getLogger(__name__)
 
-# Configuration
-HOST = 'https://api.bloomberg.com'
-CLIENT_ID = os.environ.get("BLOOMBERG_CLIENT_ID")
-CLIENT_SECRET = os.environ.get("BLOOMBERG_CLIENT_SECRET")
-OAUTH2_ENDPOINT = "https://bsso.blpprofessional.com/ext/api/as/token.oauth2"
+BLOOMBERG_CLIENT_ID = os.getenv('BLOOMBERG_CLIENT_ID')
+BLOOMBERG_CLIENT_SECRET = os.getenv('BLOOMBERG_CLIENT_SECRET')
 
-class BloombergApiSession(OAuth2Session):
-    """Custom session class for making requests to Bloomberg API using OAuth2 authentication."""
+if not BLOOMBERG_CLIENT_ID or not BLOOMBERG_CLIENT_SECRET:
+    raise ValueError("Bloomberg API credentials not found in environment variables.")
 
+class DLRestApiSession(OAuth2Session):
+    """Custom session class for making requests to a DL REST API using OAuth2 authentication."""
     def __init__(self, *args, **kwargs):
-        """Initialize a BloombergApiSession instance."""
+        """
+        Initialize a DLRestApiSession instance.
+        """
         super().__init__(*args, **kwargs)
-        # This is a required header for each call to Bloomberg API
-        self.headers['api-version'] = '2'
 
     def request_token(self):
-        """Fetch an OAuth2 access token by making a request to the token endpoint."""
+        """
+        Fetch an OAuth2 access token by making a request to the token endpoint.
+        """
+        oauth2_endpoint = os.getenv('BLOOMBERG_OAUTH_ENDPOINT', 'https://bsso.blpprofessional.com/ext/api/as/token.oauth2')
         self.token = self.fetch_token(
-            token_url=OAUTH2_ENDPOINT,
-            client_secret=CLIENT_SECRET
+            token_url=oauth2_endpoint,
+            client_secret=BLOOMBERG_CLIENT_SECRET
         )
-        expires_in_hours = self.token.get('expires_in', 0) / 3600
-        LOG.info(f'OAuth2 token obtained. Expires in {expires_in_hours:.1f} hours')
 
     def request(self, *args, **kwargs):
         """
         Override the parent class method to handle TokenExpiredError by refreshing the token.
+        :return: response object from the API request
         """
         try:
             response = super().request(*args, **kwargs)
         except TokenExpiredError:
-            LOG.info("Token expired. Requesting a new one...")
             self.request_token()
             response = super().request(*args, **kwargs)
+
         return response
 
     def send(self, request, **kwargs):
         """
         Override the parent class method to log request and response information.
+        :param request: prepared request object
+        :return: response object from the API request
         """
         LOG.info("Request being sent to HTTP server: %s, %s, %s", request.method, request.url, request.headers)
 
@@ -68,155 +73,159 @@ class BloombergApiSession(OAuth2Session):
         if response.ok:
             # Filter out file download responses and empty responses.
             if not response.headers.get("Content-Disposition") and response.content:
-                # Limit the response content logging to avoid overwhelming logs
-                content = response.json()
-                LOG.info("Response content: %s", json.dumps(content, indent=2)[:300] + "...")
+                LOG.info("Response content: %s", json.dumps(response.json(), indent=2))
         else:
-            try:
-                error_detail = response.json()
-                LOG.error("Error response: %s", json.dumps(error_detail, indent=2))
-            except:
-                LOG.error("Error response (not JSON): %s", response.text[:300])
-            
-            raise RuntimeError(f'\n\tUnexpected response status code: {response.status_code}\nDetails: {response.text[:300]}')
+            raise RuntimeError('\n\tUnexpected response status code: {c}\nDetails: {r}'.format(
+                    c=str(response.status_code), r=response.json()))
 
         return response
 
-def get_catalog_data(catalog_id=None):
+CLIENT = BackendApplicationClient(client_id=BLOOMBERG_CLIENT_ID)
+
+SESSION = DLRestApiSession(client=CLIENT)
+SESSION.headers['api-version'] = '2'
+SESSION.request_token()
+
+HOST = os.getenv('BLOOMBERG_API_HOST', 'https://api.bloomberg.com')
+
+DOWNLOADS_PATH = os.path.join(os.getcwd(), 'downloads')
+os.makedirs(DOWNLOADS_PATH, exist_ok=True)
+
+DATA_PATH = os.path.join(os.getcwd(), 'data')
+IDENTIFIERS_FILE = os.path.join(DATA_PATH, 'identifiers.json')
+
+def load_identifiers_json():
     """
-    Retrieve catalog data from Bloomberg API.
-    
-    Args:
-        catalog_id (str, optional): The ID of a specific catalog to retrieve.
-                                   If None, retrieves all catalogs.
+    Load identifiers array from the JSON file in the data directory.
     
     Returns:
-        dict: The catalog data
+        list: The list of identifier objects
     """
-    if not CLIENT_ID or not CLIENT_SECRET:
-        raise ValueError("Bloomberg client credentials not found. Please set BLOOMBERG_CLIENT_ID and BLOOMBERG_CLIENT_SECRET in your .env file.")
-
-    # Initialize OAuth session
-    client = BackendApplicationClient(client_id=CLIENT_ID)
-    session = BloombergApiSession(client=client)
-    session.request_token()
-    
-    # Construct the URL based on whether a catalog_id was provided
-    if catalog_id:
-        url = urljoin(HOST, f'/eap/catalogs/{catalog_id}')
-    else:
-        url = urljoin(HOST, '/eap/catalogs/')
-    
-    # Make the request
-    response = session.get(url)
-    return response.json()
-
-def discover_scheduled_catalog():
-    """
-    Discover the catalog identifier for scheduling requests.
-    
-    Returns:
-        str: The catalog ID for scheduled requests
-    """
-    catalogs_data = get_catalog_data()
-    catalogs = catalogs_data['contains']
-    
-    for catalog in catalogs:
-        if catalog.get('subscriptionType') == 'scheduled':
-            # Take the catalog having "scheduled" subscription type,
-            # which corresponds to the Data License account number.
-            return catalog['identifier']
-    
-    # We exhausted the catalogs, but didn't find a scheduled catalog.
-    LOG.error('Scheduled catalog not in %r', catalogs)
-    raise RuntimeError('Scheduled catalog not found')
-
-def explore_catalog_resources(catalog_id, resource_type):
-    """
-    Explore a specific resource type within the catalog (datasets, requests, etc.)
-    
-    Args:
-        catalog_id (str): The catalog ID
-        resource_type (str): The type of resource to explore (datasets, requests, etc.)
-    
-    Returns:
-        dict: The resource data
-    """
-    # Initialize a new session for this request
-    client = BackendApplicationClient(client_id=CLIENT_ID)
-    session = BloombergApiSession(client=client)
-    session.request_token()
-    
-    url = urljoin(HOST, f'/eap/catalogs/{catalog_id}/{resource_type}')
-    
-    response = session.get(url)
-    return response.json()
-
-def explore_catalog_structure(catalog_data):
-    """
-    Explore and print the structure of the catalog data.
-    
-    Args:
-        catalog_data (dict): The catalog data to explore
-    """
-    if not catalog_data:
-        LOG.info("No catalog data to explore.")
-        return
-    
-    # Print basic catalog information
-    LOG.info(f"Catalog ID: {catalog_data.get('identifier', 'N/A')}")
-    LOG.info(f"Catalog Title: {catalog_data.get('title', 'N/A')}")
-    LOG.info(f"Description: {catalog_data.get('description', 'N/A')}")
-    
-    # Print contained resources
-    if 'contains' in catalog_data:
-        LOG.info("\nContained resources:")
-        for resource in catalog_data['contains']:
-            LOG.info(f"- {resource.get('title', 'Unnamed')}: {resource.get('description', 'No description')}")
-            LOG.info(f"  ID: {resource.get('@id', 'N/A')}")
-
-def save_catalog_data(catalog_data, filename=None):
-    """
-    Save the catalog data to a JSON file.
-    
-    Args:
-        catalog_data (dict): The catalog data to save
-        filename (str, optional): Custom filename. If None, a default name with timestamp will be used.
-    """
-    if not catalog_data:
-        LOG.info("No catalog data to save.")
-        return
-    
-    if not filename:
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        catalog_id = catalog_data.get('identifier', 'unknown')
-        filename = f"data/bloomberg_catalog_{catalog_id}_{timestamp}.json"
-    
-    with open(filename, 'w') as f:
-        json.dump(catalog_data, f, indent=2)
-    
-    LOG.info(f"Catalog data saved to {filename}")
-
-if __name__ == "__main__":
     try:
-        # Discover the scheduled catalog ID
-        catalog_id = discover_scheduled_catalog()
-        LOG.info(f"Discovered scheduled catalog ID: {catalog_id}")
-        
-        # Get detailed information about the catalog
-        catalog_data = get_catalog_data(catalog_id)
-        explore_catalog_structure(catalog_data)
-        save_catalog_data(catalog_data)
-        
-        # Explore different resource types
-        resource_types = ["datasets", "requests", "universes", "fieldLists", "triggers"]
-        for resource_type in resource_types:
-            LOG.info(f"\nExploring {resource_type}...")
-            try:
-                resource_data = explore_catalog_resources(catalog_id, resource_type)
-                save_catalog_data(resource_data, f"bloomberg_{resource_type}_{catalog_id}.json")
-            except Exception as e:
-                LOG.error(f"Error exploring {resource_type}: {e}")
-    
+        with open(IDENTIFIERS_FILE, 'r') as file:
+            return json.load(file)
+    except FileNotFoundError:
+        LOG.error(f"Identifiers file not found: {IDENTIFIERS_FILE}")
+        raise
+    except json.JSONDecodeError:
+        LOG.error(f"Invalid JSON format in identifiers file: {IDENTIFIERS_FILE}")
+        raise
+
+if __name__ == '__main__':
+    catalogs_url = urljoin(HOST, '/eap/catalogs/')
+    response = SESSION.get(catalogs_url)
+    catalogs = response.json()['contains']
+    for catalog in catalogs:
+        if catalog['subscriptionType'] == 'scheduled':
+            catalog_id = catalog['identifier']
+            break
+    else:
+        LOG.error('Scheduled catalog not in %r', response.json()['contains'])
+        raise RuntimeError('Scheduled catalog not found')
+
+    ############################################################################
+    # - Load identifiers from JSON file
+    try:
+        identifiers = load_identifiers_json()
+        LOG.info(f"Successfully loaded {len(identifiers)} identifiers from JSON file")
     except Exception as e:
-        LOG.error(f"Error in main execution: {e}", exc_info=True)
+        LOG.error(f"Failed to load identifiers: {str(e)}")
+        raise
+    request_name = 'Python301DataRequest' + str(uuid.uuid1())[:6]
+    request_payload = {
+        '@type': 'DataRequest',
+        'name': request_name,
+        'description': 'Bloomberg financial data request using identifiers from JSON file',
+        'universe': {
+            '@type': 'Universe',
+            'contains': identifiers  
+        },
+        'fieldList': {
+            '@type': 'DataFieldList',
+            'contains': [
+                {'mnemonic': 'TOT_DEBT_TO_TOT_ASSET'},
+                {'mnemonic': 'CASH_DVD_COVERAGE'},
+                {'mnemonic': 'TOT_DEBT_TO_EBITDA'},
+                {'mnemonic': 'CUR_RATIO'},
+                {'mnemonic': 'QUICK_RATIO'},
+                {'mnemonic': 'GROSS_MARGIN'},
+                {'mnemonic': 'INTEREST_COVERAGE_RATIO'},
+                {'mnemonic': 'EBITDA_MARGIN'},
+                {'mnemonic': 'TOT_LIAB_AND_EQY'},
+                {'mnemonic': 'NET_DEBT_TO_SHRHLDR_EQTY'}
+            ],
+        },
+        'trigger': {
+            '@type': 'SubmitTrigger',
+        },
+        'formatting': {
+            '@type': 'MediaType',
+            'outputMediaType': 'application/json',
+        },
+    }
+        
+    LOG.info('Request component payload:\n%s', json.dumps(request_payload, indent=2))
+    
+    catalog_url = urljoin(HOST, '/eap/catalogs/{c}/'.format(c=catalog_id))
+    requests_url = urljoin(catalog_url, 'requests/')
+    response = SESSION.post(requests_url, json=request_payload)
+    
+    request_location = response.headers['Location']
+    request_url = urljoin(HOST, request_location)
+    request_id = json.loads(response.text)['request']['identifier']
+    LOG.info('%s resource has been successfully created at %s',
+             request_name,
+             request_url)
+    SESSION.get(request_url)
+    responses_url = urljoin(HOST, '/eap/catalogs/{c}/content/responses/'.format(c=catalog_id))
+    params = {
+        'prefix': request_name,
+        'requestIdentifier': request_id,
+    }
+    reply_timeout_minutes = 45
+    reply_timeout = datetime.timedelta(minutes=reply_timeout_minutes)
+    expiration_timestamp = datetime.datetime.utcnow() + reply_timeout
+
+    while datetime.datetime.utcnow() < expiration_timestamp:
+        content_responses = SESSION.get(responses_url, params=params)
+        response_contains = json.loads(content_responses.text)['contains']
+        if len(response_contains) > 0 :
+            output = response_contains[0]
+            LOG.info('Response listing:\n%s', json.dumps(output, indent=2))
+            output_key = output['key']
+            output_url = urljoin(
+                HOST,
+                '/eap/catalogs/{c}/content/responses/{key}'.format(c=catalog_id, key=output_key)
+            )
+            output_file_path = os.path.join(DOWNLOADS_PATH, output_key)
+            break
+        else:
+            LOG.info('Content not ready for download yet. Waiting...')
+            time.sleep(30)
+    else:
+        LOG.info('Response not received within %s minutes. Exiting.', reply_timeout_minutes)
+    with SESSION.get(output_url, stream=True) as response:
+        output_filename = output_key
+        if 'content-encoding' in response.headers:
+            if response.headers['content-encoding'] == 'gzip':
+                output_filename = output_filename + '.gz'
+            elif response.headers['content-encoding'] == '':
+                pass
+            else:
+                raise RuntimeError('Unsupported content encoding received in the response')
+    
+        output_file_path = os.path.join(DOWNLOADS_PATH, output_filename)
+    
+        with open(output_file_path, 'wb') as output_file:
+            LOG.info('Loading file from: %s (can take a while) ...', output_url)
+            shutil.copyfileobj(response.raw, output_file)
+    
+    LOG.info('File downloaded: %s', output_filename)
+    LOG.debug('File location: %s', output_file_path)
+    try:
+        import pandas
+        with open(output_file_path, 'rb') as output_file:
+            df = pandas.read_json(output_file, compression='gzip')
+            print(df)
+    except ImportError:
+        LOG.warning("pandas not installed. To view the data, install pandas or manually check the downloaded file.")
