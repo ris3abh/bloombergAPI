@@ -1,15 +1,8 @@
-#!/usr/bin/env python
-# coding: utf-8
 """
-Bloomberg Data License API Client
-
-A structured, object-oriented client for accessing the Bloomberg Data License API.
-This client allows for retrieving financial data from Bloomberg using identifiers
-from a JSON file and environment-based configuration.
+Bloomberg Data License API client
 """
 
 import datetime
-import io
 import json
 import logging
 import os
@@ -17,111 +10,31 @@ import shutil
 import time
 import uuid
 from urllib.parse import urljoin
-from dotenv import load_dotenv
 
-from oauthlib.oauth2 import BackendApplicationClient, TokenExpiredError
-from requests_oauthlib import OAuth2Session
+from oauthlib.oauth2 import BackendApplicationClient
+from .session import DLRestApiSession
 
-
-class DLRestApiSession(OAuth2Session):
-    """Custom session class for making requests to a DL REST API using OAuth2 authentication."""
-    
-    def __init__(self, *args, **kwargs):
-        """Initialize a DLRestApiSession instance."""
-        super().__init__(*args, **kwargs)
-
-    def request_token(self, oauth2_endpoint, client_secret):
-        """
-        Fetch an OAuth2 access token by making a request to the token endpoint.
-        
-        Args:
-            oauth2_endpoint (str): The OAuth2 token endpoint URL
-            client_secret (str): The client secret for authentication
-        """
-        self.token = self.fetch_token(
-            token_url=oauth2_endpoint,
-            client_secret=client_secret
-        )
-
-    def request(self, *args, **kwargs):
-        """
-        Override the parent class method to handle TokenExpiredError by refreshing the token.
-        
-        Returns:
-            Response: The response object from the API request
-        """
-        try:
-            response = super().request(*args, **kwargs)
-        except TokenExpiredError:
-            self.request_token()
-            response = super().request(*args, **kwargs)
-
-        return response
-
-    def send(self, request, **kwargs):
-        """
-        Override the parent class method to log request and response information.
-        
-        Args:
-            request: Prepared request object
-            
-        Returns:
-            Response: The response object from the API request
-        """
-        logging.info("Request being sent to HTTP server: %s, %s, %s", 
-                     request.method, request.url, request.headers)
-
-        response = super().send(request, **kwargs)
-
-        logging.info("Response status: %s", response.status_code)
-        logging.info("Response x-request-id: %s", response.headers.get("x-request-id"))
-
-        if response.ok:
-            # Filter out file download responses and empty responses.
-            if not response.headers.get("Content-Disposition") and response.content:
-                logging.info("Response content: %s", json.dumps(response.json(), indent=2))
-        else:
-            raise RuntimeError(
-                '\n\tUnexpected response status code: {c}\nDetails: {r}'.format(
-                    c=str(response.status_code), r=response.json())
-            )
-
-        return response
-
-
-class BloombergDataClient:
+class BloombergApiClient:
     """Client for interacting with Bloomberg Data License API."""
     
-    def __init__(self):
-        """Initialize the Bloomberg Data Client with configurations from environment variables."""
-        # Load environment variables
-        load_dotenv()
+    def __init__(self, config):
+        """
+        Initialize the Bloomberg API Client with configuration.
         
-        # Configure logging
-        logging.basicConfig(
-            level=logging.INFO,
-            format='%(asctime)s [%(levelname)-8s] [%(name)s:%(lineno)s]: %(message)s',
-        )
+        Args:
+            config (dict): Configuration parameters
+        """
         self.logger = logging.getLogger(__name__)
         
-        # Get credentials from environment variables
-        self.client_id = os.getenv('BLOOMBERG_CLIENT_ID')
-        self.client_secret = os.getenv('BLOOMBERG_CLIENT_SECRET')
+        # Set Bloomberg API configuration
+        self.client_id = config['bloomberg']['client_id']
+        self.client_secret = config['bloomberg']['client_secret']
+        self.host = config['bloomberg']['api_host']
+        self.oauth_endpoint = config['bloomberg']['oauth_endpoint']
         
-        if not self.client_id or not self.client_secret:
-            raise ValueError("Bloomberg API credentials not found in environment variables.")
-        
-        # Define API endpoints
-        self.host = os.getenv('BLOOMBERG_API_HOST', 'https://api.bloomberg.com')
-        self.oauth_endpoint = os.getenv('BLOOMBERG_OAUTH_ENDPOINT', 
-                                        'https://bsso.blpprofessional.com/ext/api/as/token.oauth2')
-        
-        # Set up directories
-        self.downloads_path = os.path.join(os.getcwd(), 'downloads')
-        os.makedirs(self.downloads_path, exist_ok=True)
-        
-        self.data_path = os.path.join(os.getcwd(), 'data')
-        self.identifiers_file = os.path.join(self.data_path, 'identifiers.json')
+        # Set file paths
+        self.downloads_path = config['paths']['downloads_dir']
+        self.identifiers_file = config['paths']['identifiers_file']
         
         # Initialize session
         self._initialize_session()
@@ -138,7 +51,7 @@ class BloombergDataClient:
     
     def load_identifiers(self):
         """
-        Load identifiers array from the JSON file in the data directory.
+        Load identifiers array from the JSON file.
         
         Returns:
             list: The list of identifier objects
@@ -199,7 +112,7 @@ class BloombergDataClient:
                 {'mnemonic': 'NET_DEBT_TO_SHRHLDR_EQTY'}
             ]
         
-        request_name = 'Python301DataRequest' + str(uuid.uuid1())[:6]
+        request_name = 'BloombergDataRequest' + str(uuid.uuid1())[:6]
         
         request_payload = {
             '@type': 'DataRequest',
@@ -273,7 +186,7 @@ class BloombergDataClient:
                 output_key = output['key']
                 return output_key
             else:
-                self.logger.info('Content not ready for download yet. Waiting...')
+                self.logger.info('Content not ready for download yet. Waiting for 30 seconds...')
                 time.sleep(30)
         
         self.logger.info('Response not received within %s minutes. Exiting.', timeout_minutes)
@@ -316,29 +229,35 @@ class BloombergDataClient:
         
         return output_file_path
     
-    def display_result(self, file_path):
+    def read_result_file(self, file_path):
         """
-        Display the content of the downloaded file using pandas.
+        Read the downloaded file and return as a pandas DataFrame.
         
         Args:
             file_path (str): The path to the downloaded file
+            
+        Returns:
+            DataFrame: The data as a pandas DataFrame
         """
         try:
-            import pandas
+            import pandas as pd
             with open(file_path, 'rb') as output_file:
-                df = pandas.read_json(output_file, compression='gzip')
-                print(df)
+                df = pd.read_json(output_file, compression='gzip')
+                self.logger.info(f"Successfully parsed data with {len(df)} rows")
                 return df
         except ImportError:
-            self.logger.warning("pandas not installed. To view the data, install pandas or manually check the downloaded file.")
-            return None
+            self.logger.error("pandas not installed. Cannot read the file as DataFrame.")
+            raise
+        except Exception as e:
+            self.logger.error(f"Error reading result file: {str(e)}")
+            raise
     
     def fetch_financial_data(self):
         """
-        Main method to fetch financial data from Bloomberg API.
+        Fetch financial data from Bloomberg API.
         
         Returns:
-            DataFrame or None: The fetched data as a pandas DataFrame if available
+            tuple: (DataFrame, file_path) - The fetched data as a pandas DataFrame and the path to the file
         """
         try:
             # Discover catalog ID
@@ -353,24 +272,17 @@ class BloombergDataClient:
             # Wait for the response
             output_key = self.wait_for_response(request_name, request_id)
             if not output_key:
-                return None
+                self.logger.error("Failed to receive response from Bloomberg API")
+                return None, None
             
             # Download result
             output_file_path = self.download_result(output_key)
             
-            # Display result
-            return self.display_result(output_file_path)
+            # Read the result file
+            df = self.read_result_file(output_file_path)
+            
+            return df, output_file_path
             
         except Exception as e:
             self.logger.error(f"Error fetching financial data: {str(e)}")
             raise
-
-
-def main():
-    """Main function to run the Bloomberg data client."""
-    client = BloombergDataClient()
-    client.fetch_financial_data()
-
-
-if __name__ == '__main__':
-    main()
