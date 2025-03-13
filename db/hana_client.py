@@ -253,3 +253,17 @@ class HanaClient:
         # different possible locations of the data
         
         # Direct access
+        if field_name in row:
+            return row[field_name]
+        
+        # Try nested dictionaries (common in Bloomberg responses)
+        if 'data' in row and isinstance(row['data'], dict) and field_name in row['data']:
+            return row['data'][field_name]
+            
+        # Try looking in a 'fields' or 'values' dictionary
+        for container in ['fields', 'values', 'results']:
+            if container in row and isinstance(row[container], dict) and field_name in row[container]:
+                return row[container][field_name]
+        
+        # Not found
+        return None
